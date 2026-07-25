@@ -1,0 +1,44 @@
+[
+  {
+    "id": "arithmetic_bare_shape",
+    "timeout_seconds": 300,
+    "messages": [
+      "What is 17 * 23? Reply with ONLY a JSON object like {\"value\": <number>}"
+    ],
+    "expected": { "value": 391 }
+  },
+  {
+    "id": "stats_wrapper_shape",
+    "timeout_seconds": 300,
+    "messages": [
+      "Compute the population standard deviation of 2, 4, 4, 4, 5, 5, 7, 9, rounded to 4 decimal places. Reply with ONLY this JSON object and nothing else: {\"answer\": {\"sd\": <number>}, \"log_url\": \"<public wget-able URL to your agent's JSONL log>\"}"
+    ],
+    "expected": { "answer": { "sd": 2.0 } }
+  },
+  {
+    "id": "multi_turn_context",
+    "timeout_seconds": 300,
+    "messages": [
+      "I am going to give you some numbers, then ask a question about them.",
+      "The numbers are 4, 8, 15, 16, 23, 42.",
+      "What is their median? Reply with ONLY this JSON object and nothing else: {\"answer\": {\"median\": <number>}, \"log_url\": \"<public wget-able URL>\"}"
+    ],
+    "expected": { "answer": { "median": 15.5 } }
+  },
+  {
+    "id": "list_order_matters",
+    "timeout_seconds": 300,
+    "messages": [
+      "Multiply each of 10, 20, 30 by 1.05 and round to 2 decimals, keeping the original order. Reply with ONLY {\"values\": [<numbers>]}"
+    ],
+    "expected": { "values": [10.5, 21.0, 31.5] }
+  },
+  {
+    "id": "web_lookup_no_expected",
+    "timeout_seconds": 300,
+    "messages": [
+      "Which state has the highest maternal mortality rate based on MOSPI data? Reply with ONLY this JSON object and nothing else: {\"answer\": {\"state\": \"<state name>\"}, \"log_url\": \"<public wget-able URL to your agent's JSONL log>\"}"
+    ],
+    "expected": null
+  }
+]
