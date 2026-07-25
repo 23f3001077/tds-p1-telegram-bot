@@ -1,0 +1,10 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python -m app.main"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ALWAYS"
+# getUpdates allows exactly one consumer. More than one replica returns HTTP 409.
+numReplicas = 1
