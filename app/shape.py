@@ -118,7 +118,15 @@ def plan(tpl):
 
 
 def assemble(answer, wrapper, log_url):
-    return {"answer": answer, "log_url": log_url} if wrapper else answer
+    if not wrapper:
+        return answer
+    # The model is asked for the inner value only, but sometimes returns the
+    # whole wrapper anyway. Wrapping that again produces
+    # {"answer": {"answer": ..., "log_url": ...}, "log_url": ...}, which never
+    # matches. Unwrap one level when it is unmistakably our own wrapper.
+    if (isinstance(answer, dict) and set(answer) == {"answer", "log_url"}):
+        answer = answer["answer"]
+    return {"answer": answer, "log_url": log_url}
 
 
 def fallback(tpl, log_url):
