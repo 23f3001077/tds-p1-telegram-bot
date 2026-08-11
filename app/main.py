@@ -23,7 +23,7 @@ import uvicorn
 from .agent import solve
 from .config import CONFIG
 from .history import History
-from .runlog import RunLog
+from .runlog import RunLog, prune
 from .server import STATE, app
 from .shape import assemble, extract_shape, fallback, plan
 from .telegram import MAX_MESSAGE_CHARS, Conflict, Telegram, TelegramError
@@ -67,6 +67,41 @@ def _chat_lock(chat_id: int) -> asyncio.Lock:
                     del _chat_locks[cid]
         lock = _chat_locks[chat_id] = asyncio.Lock()
     return lock
+
+
+def _deadline(history: History, chat_id: int, started: float,
+              runlog: RunLog) -> float:
+    """When this answer must be sent by.
+
+    collect.py gives ONE timeout to the whole exchange, not to each message, so
+    the real constraint is measured from the exchange's first message. Context
+    turns are answered instantly (no LLM call), so a single-turn question gets
+    nearly the entire window — far more than the flat per-message budget that
+    used to starve slow multi-hop questions.
+
+    Two bounds apply, whichever is tighter:
+      * the exchange window, minus a margin for Telegram round-trips
+      * REPLY_BUDGET, so one message in a multi-question exchange cannot eat
+        the whole window and strand a later one
+    """
+    exchange_start = history.started_at(chat_id) or started
+    by_exchange = exchange_start + CONFIG.exchange_budget - CONFIG.exchange_margin
+    by_message = started + CONFIG.reply_budget
+    deadline = min(by_exchange, by_message)
+
+    # Never hand solve() a budget so small it cannot finish a single step; a
+    # doomed attempt should still be given its shot rather than aborting early.
+    floor = started + 20.0
+    if deadline < floor:
+        deadline = floor
+
+    runlog.write(
+        "budget",
+        seconds=round(deadline - started, 1),
+        exchange_elapsed=round(started - exchange_start, 1),
+        bound="exchange" if by_exchange < by_message else "message",
+    )
+    return deadline
 
 
 def _safe_fallback(template: str | None, log_url: str) -> object:
@@ -121,7 +156,7 @@ async def answer(tg: Telegram, history: History, chat_id: int, text: str) -> Non
 
             inner, wrapper = plan(template)
             runlog = RunLog(CONFIG.log_dir / f"{run_id}.jsonl", run_id, log_url)
-            deadline = started + CONFIG.reply_budget
+            deadline = _deadline(history, chat_id, started, runlog)
 
             async with _run_slots:
                 answer_obj = await asyncio.wait_for(
@@ -221,6 +256,18 @@ async def poll(tg: Telegram, history: History) -> None:
         await asyncio.wait(tasks, timeout=CONFIG.reply_budget + 30)
 
 
+async def housekeeping() -> None:
+    """Periodic disk hygiene so a long-lived deployment cannot fill its volume."""
+    while not _shutdown.is_set():
+        try:
+            await asyncio.to_thread(prune, CONFIG.log_dir,
+                                    CONFIG.log_retention_days)
+        except Exception as exc:  # noqa: BLE001 - never take down the process
+            log.warning("housekeeping failed: %s", exc)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(_shutdown.wait(), timeout=6 * 3600)
+
+
 async def main_async() -> None:
     global _run_slots
     _run_slots = asyncio.Semaphore(CONFIG.max_concurrent_runs)
@@ -270,11 +317,13 @@ async def main_async() -> None:
         sys.exit(f"Telegram rejected the token: {exc}")
 
     poll_task = asyncio.create_task(poll(tg, history))
+    housekeeping_task = asyncio.create_task(housekeeping())
 
     await _shutdown.wait()
     log.info("shutting down")
     server.should_exit = True
-    await asyncio.gather(poll_task, server_task, return_exceptions=True)
+    await asyncio.gather(poll_task, server_task, housekeeping_task,
+                         return_exceptions=True)
     await tg.aclose()
 
 
