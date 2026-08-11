@@ -45,7 +45,11 @@ class RunLog:
             log.warning("could not create log dir %s: %s", self.path.parent, exc)
         self.write("run_start", run_id=run_id, log_url=url)
 
-    def write(self, kind: str, **fields) -> None:
+    def write(self, kind: str, /, **fields) -> None:
+        # `kind` is positional-only so a caller may still pass a field literally
+        # named "kind" without colliding with this parameter. Getting that wrong
+        # raises TypeError from inside logging, which would abort a run that was
+        # otherwise fine.
         if self._closed or self._bytes > MAX_LOG_BYTES:
             return
         record = {
