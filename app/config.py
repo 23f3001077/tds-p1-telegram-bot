@@ -68,6 +68,9 @@ class Config:
     log_dir: Path
     state_path: Path
     reply_budget: float
+    exchange_budget: float
+    exchange_margin: float
+    log_retention_days: int
     agent_max_steps: int
     py_timeout: int
     py_max_output: int
@@ -93,7 +96,10 @@ class Config:
             public_base_url=_public_base_url(port),
             log_dir=log_dir,
             state_path=Path(os.getenv("STATE_PATH", str(log_dir.parent / "state.json"))),
-            reply_budget=_float("REPLY_BUDGET", 150.0),
+            reply_budget=_float("REPLY_BUDGET", 250.0),
+            exchange_budget=_float("EXCHANGE_BUDGET", 300.0),
+            exchange_margin=_float("EXCHANGE_MARGIN", 35.0),
+            log_retention_days=_int("LOG_RETENTION_DAYS", 30),
             agent_max_steps=_int("AGENT_MAX_STEPS", 12),
             py_timeout=_int("PY_TIMEOUT", 90),
             py_max_output=_int("PY_MAX_OUTPUT", 6000),
@@ -124,10 +130,17 @@ class Config:
                 "to wget your log_url. On Railway, generate a domain under "
                 "Settings > Networking, or set PUBLIC_BASE_URL explicitly."
             )
-        if self.reply_budget >= 290:
+        if self.reply_budget + self.exchange_margin > self.exchange_budget:
             out.append(
-                f"REPLY_BUDGET={self.reply_budget}s leaves no room inside the "
-                "grader's 300s exchange budget"
+                f"REPLY_BUDGET={self.reply_budget}s + EXCHANGE_MARGIN="
+                f"{self.exchange_margin}s exceeds EXCHANGE_BUDGET="
+                f"{self.exchange_budget}s — a single answer could overrun the "
+                "grader's exchange timeout, which is a terminal `timeout`"
+            )
+        if self.exchange_margin < 15:
+            out.append(
+                f"EXCHANGE_MARGIN={self.exchange_margin}s is too small to absorb "
+                "Telegram round-trips; a late reply is a terminal `timeout`"
             )
         return out
 
