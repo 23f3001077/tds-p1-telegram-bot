@@ -70,3 +70,35 @@ class RunLog:
     def close(self, **fields) -> None:
         self.write("run_end", elapsed=round(time.time() - self.started, 3), **fields)
         self._closed = True
+
+
+def prune(log_dir, retention_days: int, keep_newest: int = 500) -> int:
+    """Delete run logs older than retention_days, always keeping the newest
+    `keep_newest` regardless of age.
+
+    Railway volumes are finite; a bot left running for months would otherwise
+    fill one and start failing to write logs at all. Retention is deliberately
+    long — a log_url handed to a grader must still resolve weeks later.
+    Never raises: this is housekeeping, not part of answering.
+    """
+    if retention_days <= 0:
+        return 0
+    try:
+        files = sorted(Path(log_dir).glob("*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("log prune could not list %s: %s", log_dir, exc)
+        return 0
+
+    cutoff = time.time() - retention_days * 86400
+    removed = 0
+    for path in files[keep_newest:]:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except Exception:  # noqa: BLE001 - a locked/vanished file is not fatal
+            continue
+    if removed:
+        log.info("pruned %d run logs older than %d days", removed, retention_days)
+    return removed
