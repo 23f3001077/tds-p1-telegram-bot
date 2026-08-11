@@ -101,7 +101,24 @@ API discovery, before you commit to a URL shape:
   answer one question — those are megabytes of XML you don't need. Ask for a
   single small record first (e.g. a page size of 1) to learn field names cheaply.
 - If two consecutive requests to the same API 404 or fail, stop and change
-  approach rather than trying a third variation of the same guess."""
+  approach rather than trying a third variation of the same guess.
+
+Slow and flaky sources — these cost more runs than wrong logic does:
+- Public data APIs are often slow. Use a generous timeout (60-90s), not 30s,
+  and wrap every fetch in a retry: try up to 3 times with a short sleep between
+  attempts. A read timeout usually means "too slow", not "wrong URL" — retrying
+  the SAME url is right here, unlike a 404.
+- Always narrow server-side before downloading. Ask the API to filter (an OData
+  $filter, a query parameter, a per-country request) instead of pulling the full
+  dataset and filtering in Python; whole-dataset downloads frequently time out
+  or truncate mid-stream.
+- Fetch per entity in a loop when a combined query is unreliable — seven small
+  requests that succeed beat one big request that dies.
+- Field values are often codes, not display names: a country may appear as
+  "MEX" rather than "Mexico", a year as the integer 2021 rather than "2021",
+  and a value as "72.5 [71.9-73.1]" with a separate clean numeric field. Print
+  one record and read its real field names and types before filtering on them —
+  a filter that silently matches nothing looks exactly like missing data."""
 
 TOOLS = [
     {
@@ -192,6 +209,7 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
                  last_message=history[-1] if history else None)
 
     consecutive_errors = 0
+    internal_errors = 0
     urgency_nudged = False
     # Shared with _handle_response: tool outcomes it observes, decisions made
     # here. Keeps the loop able to react without threading return values.
@@ -214,7 +232,7 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
             # merely mistyped. Left alone the model tends to re-send the same
             # URL with different filter syntax until the clock runs out.
             state["tool_failures"] = -1  # nudge once per run, not every step
-            runlog.write("nudge", kind="repeated_tool_failure", step=step)
+            runlog.write("nudge", reason="repeated_tool_failure", step=step)
             messages.append({
                 "role": "user",
                 "content": (
@@ -272,8 +290,20 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
 
         if response is not None:
             consecutive_errors = 0
-            result = await _handle_response(response, messages, runlog, step,
-                                            deadline, state)
+            try:
+                result = await _handle_response(response, messages, runlog, step,
+                                                deadline, state)
+            except Exception as exc:  # noqa: BLE001
+                # A defect in our own handling must not forfeit the remaining
+                # budget: log it, drop this step, and let the loop carry on.
+                log.exception("handling step %d failed", step)
+                runlog.write("handler_error", step=step,
+                             error=f"{type(exc).__name__}: {exc}")
+                internal_errors += 1
+                if internal_errors >= 3:
+                    runlog.write("abort", reason="repeated internal errors")
+                    return None
+                continue
             if result is not _CONTINUE:
                 return result
             continue
