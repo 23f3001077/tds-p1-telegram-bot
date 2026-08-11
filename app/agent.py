@@ -118,7 +118,22 @@ Slow and flaky sources — these cost more runs than wrong logic does:
   "MEX" rather than "Mexico", a year as the integer 2021 rather than "2021",
   and a value as "72.5 [71.9-73.1]" with a separate clean numeric field. Print
   one record and read its real field names and types before filtering on them —
-  a filter that silently matches nothing looks exactly like missing data."""
+  a filter that silently matches nothing looks exactly like missing data.
+
+Dimensioned data — the most common way a run computes a confident wrong answer:
+- Statistical datasets are usually split by dimensions: sex, age band, urban or
+  rural, estimate type. One (country, year) can therefore return SEVERAL rows.
+  Filter explicitly on every dimension the question names — "both sexes" means
+  adding that condition to the query, not hoping it is the default.
+- Never collapse rows with {row[key]: row[value] for row in rows} unless you
+  have checked the key is unique. Silently keeping whichever row happened to
+  come last is not an error you will see; it just produces a plausible wrong
+  number. Count the rows first, or assert one row per key.
+- Verify your intermediates against the question's own wording. If the question
+  calls something a GAIN and your arithmetic makes it negative, or a LOSS and it
+  comes out negative, you are almost certainly reading the wrong rows — go back
+  and check your filters before you submit. Print the row count per group and
+  confirm it is what you expect."""
 
 TOOLS = [
     {
