@@ -89,7 +89,19 @@ Shape rules, which decide whether you score at all:
 
 You are on a hard clock. If the deadline is close, submit your best supported
 answer instead of continuing to investigate — a wrong answer and no answer score
-the same, but no answer also wastes the attempt."""
+the same, but no answer also wastes the attempt.
+
+API discovery, before you commit to a URL shape:
+- Don't assume a REST/OData convention is correct. A generic collection name
+  like ".../IndicatorData?filter=..." is a guess, not a fact — if it 404s once,
+  don't retry the same shape with different filter syntax. Instead probe the
+  API's root or docs to learn its real structure (e.g. some OData APIs expose
+  one entity per code, like ".../WHOSIS_000001", not a filterable collection).
+- Never fetch a full schema/metadata document (like an OData $metadata file) to
+  answer one question — those are megabytes of XML you don't need. Ask for a
+  single small record first (e.g. a page size of 1) to learn field names cheaply.
+- If two consecutive requests to the same API 404 or fail, stop and change
+  approach rather than trying a third variation of the same guess."""
 
 TOOLS = [
     {
@@ -131,6 +143,34 @@ TOOLS = [
 ]
 
 
+_FAILURE_MARKERS = (
+    "[exit code",
+    "traceback (most recent call last)",
+    "[timed out after",
+    "[out of memory]",
+    "[sandbox failed",
+)
+
+
+def _looks_failed(output: str) -> bool:
+    """Whether a run_python result was an error rather than a usable answer."""
+    low = (output or "").lower()
+    return any(marker in low for marker in _FAILURE_MARKERS)
+
+
+def _has_placeholder(value) -> bool:
+    """True if the model echoed a template placeholder like "<country name>"
+    instead of substituting a real value."""
+    if isinstance(value, str):
+        text = value.strip()
+        return text.startswith("<") and text.endswith(">")
+    if isinstance(value, dict):
+        return any(_has_placeholder(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_placeholder(v) for v in value)
+    return False
+
+
 def _build_prompt(history: list[str], shape: str) -> str:
     convo = "\n\n".join(f"[message {i + 1}]\n{m}" for i, m in enumerate(history))
     return (
@@ -152,6 +192,10 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
                  last_message=history[-1] if history else None)
 
     consecutive_errors = 0
+    urgency_nudged = False
+    # Shared with _handle_response: tool outcomes it observes, decisions made
+    # here. Keeps the loop able to react without threading return values.
+    state = {"tool_failures": 0, "placeholder_rejected": False}
 
     for step in range(CONFIG.agent_max_steps):
         remaining = deadline - time.time()
@@ -164,6 +208,37 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
             messages.append({
                 "role": "user",
                 "content": "You are nearly out of steps. Call submit now with your best answer.",
+            })
+        elif state["tool_failures"] == 2:
+            # Two failures in a row means the current approach is wrong, not
+            # merely mistyped. Left alone the model tends to re-send the same
+            # URL with different filter syntax until the clock runs out.
+            state["tool_failures"] = -1  # nudge once per run, not every step
+            runlog.write("nudge", kind="repeated_tool_failure", step=step)
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your last two attempts both failed. Do not retry the same "
+                    "endpoint or approach with small variations — that is what "
+                    "just failed twice. Change strategy: inspect what the source "
+                    "actually offers (its index, root listing, or documentation) "
+                    "with ONE small cheap request, or switch to a different data "
+                    "source entirely. Keep each request small."
+                ),
+            })
+        elif not urgency_nudged and remaining <= 45:
+            # Some questions blow the wall clock long before they blow the step
+            # count (e.g. slow/unfamiliar external APIs) — the step-based nudge
+            # above never fires in that case, so watch the clock too.
+            urgency_nudged = True
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Only ~{int(remaining)}s remain before the reply deadline. "
+                    "Stop investigating and call submit now with your best "
+                    "supported answer — a late reply scores nothing at all, "
+                    "which is worse than a guess."
+                ),
             })
 
         response = None
@@ -197,7 +272,8 @@ async def solve(history: list[str], shape: str, runlog: RunLog,
 
         if response is not None:
             consecutive_errors = 0
-            result = await _handle_response(response, messages, runlog, step, deadline)
+            result = await _handle_response(response, messages, runlog, step,
+                                            deadline, state)
             if result is not _CONTINUE:
                 return result
             continue
@@ -215,7 +291,7 @@ _CONTINUE = object()
 
 
 async def _handle_response(response, messages, runlog: RunLog, step: int,
-                           deadline: float):
+                           deadline: float, state: dict):
     choice = response.choices[0].message
     try:
         messages.append(choice.model_dump(exclude_none=True))
@@ -258,17 +334,40 @@ async def _handle_response(response, messages, runlog: RunLog, step: int,
                     "content": f"That is not valid JSON ({exc}). Send only the raw JSON value.",
                 })
                 continue
+            if _has_placeholder(answer) and not state["placeholder_rejected"]:
+                # The template was echoed back instead of answered. Push back
+                # once — never twice, or a stubborn model burns the whole clock.
+                state["placeholder_rejected"] = True
+                runlog.write("submit_rejected", reason="placeholder", raw=raw)
+                messages.append({
+                    "role": "tool", "tool_call_id": call.id,
+                    "content": (
+                        "That still contains a template placeholder in angle "
+                        "brackets. Replace it with the real computed value."
+                    ),
+                })
+                continue
             runlog.write("final", answer=answer)
             return answer
 
         if name == "run_python":
             code = args.get("code", "")
             runlog.write("tool_call", step=step, tool="run_python", code=code)
-            budget = max(5, min(CONFIG.py_timeout, int(deadline - time.time()) - 10))
+            # Proportional, not just "whatever is left minus 10". A single call
+            # may take at most half the remaining time, so a slow fetch late in
+            # the run cannot burn the endgame and leave nothing to recover with
+            # — the failure mode where a 38s $metadata fetch ate the last 48s.
+            remaining = deadline - time.time()
+            budget = max(5, min(CONFIG.py_timeout,
+                                int(remaining * 0.5),
+                                int(remaining) - 15))
             output = await asyncio.to_thread(
                 run_python, code, budget, CONFIG.py_max_output,
             )
-            runlog.write("tool_result", step=step, output=output)
+            failed = _looks_failed(output)
+            runlog.write("tool_result", step=step, output=output, failed=failed)
+            if state["tool_failures"] >= 0:  # -1 means "already nudged"
+                state["tool_failures"] = state["tool_failures"] + 1 if failed else 0
             messages.append({"role": "tool", "tool_call_id": call.id,
                              "content": output})
             continue
