@@ -46,6 +46,17 @@ def _child_env(workdir: str) -> dict[str, str]:
         "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "MPLBACKEND": "Agg",
+        # OpenBLAS reserves per-thread buffers sized from the host CPU count.
+        # Under RLIMIT_AS that reservation fails and numpy/pandas cannot even
+        # import ("OpenBLAS error: Memory allocation still failed after 10
+        # retries"), which looks like a broken sandbox rather than a tuning
+        # problem. One thread each keeps the footprint small; these workloads
+        # are IO-bound anyway.
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
     })
     return env
 
