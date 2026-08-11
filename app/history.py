@@ -55,12 +55,24 @@ class History:
         with self._lock:
             self._expire(now)
             key = str(chat_id)
-            record = self._chats.setdefault(key, {"messages": [], "updated": now})
+            record = self._chats.setdefault(
+                key, {"messages": [], "updated": now, "started": now})
+            record.setdefault("started", now)  # records written before this field
             record["messages"].append(text)
             record["messages"] = record["messages"][-self.max_messages:]
             record["updated"] = now
             self._save()
             return list(record["messages"])
+
+    def started_at(self, chat_id: int) -> float | None:
+        """When the current exchange's first message arrived, or None.
+
+        The grader's timeout covers the whole exchange, so the deadline for the
+        final answer has to be measured from here, not from the last message.
+        """
+        with self._lock:
+            record = self._chats.get(str(chat_id))
+            return record.get("started") if record else None
 
     def clear(self, chat_id: int) -> None:
         """Forget this chat. Called once a question has been answered, so the
